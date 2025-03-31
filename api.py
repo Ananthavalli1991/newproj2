@@ -72,5 +72,5 @@ def answer_assignment():
 
     return jsonify({"answer": llm_response})
 
-if __name__ == "__main__":
-    app.run(debug=True)
+def handler(request, *args, **kwargs):
+    return app(request.environ, start_response)
