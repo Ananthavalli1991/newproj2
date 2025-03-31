@@ -3,84 +3,85 @@ import os
 import zipfile
 import pandas as pd
 import PyPDF2
-from flask import Flask, request, jsonify
-from werkzeug.utils import secure_filename
+from fastapi import FastAPI, UploadFile, Form
+from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
 
 # Load API Key securely
 load_dotenv()
-openai.api_key = os.getenv("OPENAI_API_KEY")  # Ensure this environment variable is set
+openai.api_key = os.getenv("OPENAI_API_KEY")  # Set your OpenAI API Key in a .env file
 
-app = Flask(__name__)
-app.config["UPLOAD_FOLDER"] = "uploads"
-os.makedirs(app.config["UPLOAD_FOLDER"], exist_ok=True)
+app = FastAPI()
 
-def extract_text_from_file(file_path):
+async def extract_text_from_file(file: UploadFile) -> str:
     """Extracts text from various file types (TXT, CSV, PDF, ZIP)."""
     text = ""
 
     try:
-        if file_path.endswith(".txt"):
-            with open(file_path, "r", encoding="utf-8") as f:
-                text = f.read()
+        if file.filename.endswith(".txt"):
+            content = await file.read()
+            text = content.decode("utf-8")
 
-        elif file_path.endswith(".csv"):
-            df = pd.read_csv(file_path)
+        elif file.filename.endswith(".csv"):
+            content = await file.read()
+            df = pd.read_csv(pd.compat.StringIO(content.decode("utf-8")))
             text = df.to_string(index=False)  # Convert CSV content to string
 
-        elif file_path.endswith(".pdf"):
-            with open(file_path, "rb") as f:
-                reader = PyPDF2.PdfReader(f)
+        elif file.filename.endswith(".pdf"):
+            content = await file.read()
+            with open("temp.pdf", "wb") as temp_pdf:
+                temp_pdf.write(content)
+            with open("temp.pdf", "rb") as pdf_file:
+                reader = PyPDF2.PdfReader(pdf_file)
                 text = " ".join([page.extract_text() for page in reader.pages if page.extract_text()])
 
-        elif file_path.endswith(".zip"):
-            with zipfile.ZipFile(file_path, "r") as zip_ref:
-                zip_ref.extractall(app.config["UPLOAD_FOLDER"])
-                for extracted_file in os.listdir(app.config["UPLOAD_FOLDER"]):
-                    extracted_path = os.path.join(app.config["UPLOAD_FOLDER"], extracted_file)
-                    text += extract_text_from_file(extracted_path)  # Recursively process extracted files
+        elif file.filename.endswith(".zip"):
+            content = await file.read()
+            with open("temp.zip", "wb") as temp_zip:
+                temp_zip.write(content)
+            with zipfile.ZipFile("temp.zip", "r") as zip_ref:
+                zip_ref.extractall("temp_extracted")
+                for extracted_file in os.listdir("temp_extracted"):
+                    extracted_path = os.path.join("temp_extracted", extracted_file)
+                    with open(extracted_path, "r", encoding="utf-8") as extracted:
+                        text += extracted.read()
 
     except Exception as e:
         text = f"Error processing file: {str(e)}"
 
     return text.strip()
 
-@app.route("/api/", methods=["POST"])
-def answer_assignment():
+@app.post("/api/")
+async def answer_assignment(
+    question: str = Form(...),
+    file: UploadFile = None
+):
     try:
-        question = request.form.get("question")
-        file = request.files.get("file")
         file_content = ""
 
-        # If a file is uploaded, extract its content
         if file:
-            filename = secure_filename(file.filename)
-            file_path = os.path.join(app.config["UPLOAD_FOLDER"], filename)
-            file.save(file_path)
+            # Extract content from the uploaded file
+            file_content = await extract_text_from_file(file)
 
-            file_content = extract_text_from_file(file_path)
-
-        # Prepare messages for GPT-4 or similar model
+        # Prepare prompt for GPT
         messages = [
             {"role": "system", "content": "You are a smart assistant that analyzes file content and answers questions based on provided data."}
         ]
 
         if file_content:
             messages.append({"role": "user", "content": f"Here is the extracted file content:\n{file_content}"})
-        
-        if question:
-            messages.append({"role": "user", "content": question})
 
-        # Generate answer using OpenAI API
-        llm_response = openai.ChatCompletion.create(
-            model="gpt-4-0613",  # Updated model name for GPT-4 (or replace with your preferred model)
-            messages=messages
-        )["choices"][0]["message"]["content"]
+        messages.append({"role": "user", "content": question})
 
-        return jsonify({"answer": llm_response})
+        # Query OpenAI API
+        response = openai.ChatCompletion.create(
+            model="gpt-3.5-turbo",  # Use "gpt-4" if desired
+            messages=messages,
+            max_tokens=500  # Adjust based on response length
+        )
+
+        answer = response["choices"][0]["message"]["content"]
+        return JSONResponse(content={"answer": answer})
 
     except Exception as e:
-        return jsonify({"error": f"Internal Server Error: {str(e)}"}), 500
-
-if __name__ == "__main__":
-    app.run(debug=True)
+        return JSONResponse(content={"error": f"Internal Server Error: {str(e)}"}, status_code=500)
